@@ -92,11 +92,9 @@
     clippy::all
 )]
 
-use std::fmt;
-
 use jni::{
     objects::{GlobalRef, JObject, JValue},
-    AttachGuard, JavaVM,
+    JavaVM,
 };
 
 const ACQUIRE_CAUSES_WAKEUP: i32 = 0x10000000;
@@ -288,6 +286,12 @@ impl Builder {
 
         let wake_lock = env.new_global_ref(result.l()?)?;
 
+        catch_exceptions(&mut env, |env| {
+            env.call_method(&wake_lock, "acquire", "()V", &[])
+        })?;
+
+        log::debug!("acquired wake lock \"{}\"", self.tag);
+
         drop(env);
 
         Ok(WakeLock {
@@ -359,103 +363,26 @@ impl WakeLock {
             env.call_method(&self.wake_lock, "isHeld", "()Z", &[])?.z()
         })
     }
-
-    /// Acquire the wake lock and force the device to stay on at the level that
-    /// was requested when the wake lock was created.
-    ///
-    /// Returns a [`Guard`] which can be used to release the lock. You should
-    /// release wake locks when you are done and don't need the lock anymore. It
-    /// is very important to do this as soon as possible to avoid running down
-    /// the device's battery excessively.
-    ///
-    /// Wake locks are reference counted like a semaphore and may be acquired
-    /// multiple times by the same or a different thread. The wake lock is not
-    /// released on the device until all acquired references have been released.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// // Create the wake lock.
-    /// let wake_lock = android_wakelock::partial("myapp:mytag")?;
-    ///
-    /// // Start keeping the device awake.
-    /// let guard = wake_lock.acquire()?;
-    ///
-    /// // Do some work while the device is awake...
-    ///
-    /// // Release the wake lock to allow the device to sleep again.
-    /// drop(guard);
-    ///
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn acquire(&self) -> Result<Guard<'_>> {
-        let mut env = self.vm.attach_current_thread()?;
-
-        catch_exceptions(&mut env, |env| {
-            env.call_method(&self.wake_lock, "acquire", "()V", &[])
-        })?;
-
-        log::debug!("acquired wake lock \"{}\"", self.tag);
-
-        Ok(Guard {
-            wake_lock: self.wake_lock.clone(),
-            env,
-            tag: &self.tag,
-        })
-    }
 }
 
-/// A guard for an acquired wake lock.
-///
-/// To create a guard see [`WakeLock::acquire`].
-///
-/// The wake lock is released automatically when the guard is dropped, but
-/// panics if there is an error releasing the wake lock. If you want to handle
-/// errors on release then you can call [`Guard::release`] instead.
-///
-/// The current thread will remain attached to the current JVM until the guard
-/// is released. The guard cannot be sent between threads.
-pub struct Guard<'a> {
-    /// Reference to the underlying Java object.
-    wake_lock: GlobalRef,
-
-    env: AttachGuard<'a>,
-
-    /// The tag specified when the wake lock was created.
-    tag: &'a str,
-}
-
-impl Guard<'_> {
-    /// Releases the wake lock, returning an error if the underlying API threw
-    /// an exception.
-    pub fn release(mut self) -> Result<()> {
-        self.release_one()
-    }
-
-    fn release_one(&mut self) -> Result<()> {
-        catch_exceptions(&mut self.env, |env| {
-            env.call_method(&self.wake_lock, "release", "()V", &[])?;
-
-            log::debug!("released wake lock \"{}\"", self.tag);
-
-            Ok(())
-        })
-    }
-}
-
-impl fmt::Debug for Guard<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Guard")
-            .field("wake_lock", &self.wake_lock)
-            .field("tag", &self.tag)
-            .finish()
-    }
-}
-
-impl Drop for Guard<'_> {
+impl Drop for WakeLock {
     fn drop(&mut self) {
-        if let Err(e) = self.release_one() {
-            panic!("error releasing wake lock \"{}\" on drop: {}", self.tag, e);
+        match self.vm.attach_current_thread() {
+            Ok(mut env) => {
+                if let Err(e) = catch_exceptions(&mut env, |env| {
+                    env.call_method(&self.wake_lock, "release", "()V", &[])?;
+
+                    log::debug!("released wake lock \"{}\"", self.tag);
+
+                    Ok(())
+                }) {
+                    log::error!("release wake lock failed: {e:?}");
+                }
+            }
+
+            Err(e) => {
+                log::error!("get env failed when release wake lock: {e:?}");
+            }
         }
     }
 }
