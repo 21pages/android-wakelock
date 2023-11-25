@@ -369,19 +369,19 @@ impl Drop for WakeLock {
     fn drop(&mut self) {
         match self.vm.attach_current_thread() {
             Ok(mut env) => {
-                if let Err(e) = catch_exceptions(&mut env, |env| {
+                if let Err(_e) = catch_exceptions(&mut env, |env| {
                     env.call_method(&self.wake_lock, "release", "()V", &[])?;
 
-                    log::debug!("released wake lock \"{}\"", self.tag);
+                    // log::debug!("released wake lock \"{}\"", self.tag);
 
                     Ok(())
                 }) {
-                    log::error!("release wake lock failed: {e:?}");
+                    // log::error!("release wake lock failed: {e:?}");
                 }
             }
 
-            Err(e) => {
-                log::error!("get env failed when release wake lock: {e:?}");
+            Err(_e) => {
+                // log::error!("get env failed when release wake lock: {e:?}");
             }
         }
     }
